@@ -7,6 +7,7 @@ Created on Wed Nov 11 16:58:34 2020
 
 import numpy as np
 
+# function to pull prior record vs. opponent up to a given date
 def get_season_series(sched):
     sched['DATE'] = sched['DATE'].dt.strftime('%Y-%m-%d')
     sched['RESULT'] = ''
@@ -29,5 +30,3 @@ def get_season_series(sched):
         sched['PRIOR_GAME_V_OPP'].iloc[idx] = len(team_vs_opponent_prior)
         
     return sched
-
-#sched = get_season_series(2020)
