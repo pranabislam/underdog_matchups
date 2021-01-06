@@ -11,4 +11,5 @@ In the bref_feature_engineering folder, a number of functions to consolidate sta
 In the model_selection folder are functions corresponding to each model type which was trained.
 The scraping folder includes preliminary work done to pull data from our respective data sources.
 
-### A final report of results and observations is also included
+### A final report of results and observations is also included:
+Report of Final Results 12.5.2020.pdf is the file name
