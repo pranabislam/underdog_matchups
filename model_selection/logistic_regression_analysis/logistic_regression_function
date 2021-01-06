@@ -1,0 +1,362 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Sun Nov 29 22:17:01 2020
+
+@author: sanjs
+"""
+
+# Logistic Regression 
+
+import os
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from copy import deepcopy
+
+from sklearn.metrics import roc_auc_score, recall_score, precision_score, f1_score, log_loss, brier_score_loss
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import GridSearchCV
+from sklearn.model_selection import KFold
+
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+
+cols_drop = ['unique_game_id', 'DATE', 'Home Team', 'Away Team']
+non_relative_columns = ['AWAY_CUM_WIN_PCT', 'AWAY_IP_AVAIL','AWAY_PRIOR_WIN_V_OPP',
+                        'AWAY_ROLL_WIN_PCT', 'Away 3P', 'Away 3P%', 'Away 3PAr', 'Away AST',
+                        'Away AST%', 'Away All Stars', 'Away BLK', 'Away BLK%', 'Away DRB',
+                        'Away DRB%', 'Away DRtg', 'Away FG', 'Away FG%', 'Away FT', 'Away FT%',
+                        'Away FTr', 'Away ORB', 'Away ORB%', 'Away ORtg', 'Away Odds Close',
+                        'Away PF', 'Away STL', 'Away STL%', 'Away TOV', 'Away TOV%', 'Away TS%',
+                        'Away eFG%', 'HOME_CUM_WIN_PCT', 'HOME_IP_AVAIL', 'HOME_PRIOR_WIN_V_OPP',
+                        'HOME_ROLL_WIN_PCT', 'Home 3P', 'Home 3P%', 'Home 3PAr', 'Home AST',
+                        'Home AST%', 'Home All Stars', 'Home BLK', 'Home BLK%', 'Home DRB',
+                        'Home DRB%', 'Home DRtg', 'Home FG', 'Home FG%', 'Home FT', 'Home FT%',
+                        'Home FTr', 'Home ORB', 'Home ORB%', 'Home ORtg', 'Home Odds Close',
+                        'Home PF', 'Home STL', 'Home STL%', 'Home TOV', 'Home TOV%', 'Home TS%',
+                        'Home eFG%', 'underdog_rel_IP_AVAIL', 'underdog_rel_All Stars']
+
+def construct_df(years, n, main_path):
+    '''
+    Given that our files are located in "..\scraping\merging\cleaned_dfs_11-23\\all_rolling_windows",
+    return concatenated df for a given rolling avg window (n) and a list of years
+    
+    years: type list of ints from 2009 - 2020
+    n: type in from 5 to 50 inclusive
+    '''
+    
+    filenames = [str(year) + "_stats_n" + str(n) + ".csv" for year in years]
+    dfs = []
+
+    for filename in filenames:
+        dfs.append(pd.read_csv(main_path + filename))
+    ## Currently assuming that we are dropping playstyle stuff so wont create robust working for it
+    ## remember to drop 'Away Underdog' after all of this is done
+
+    concatenated_df = pd.concat(dfs)#.drop(columns=cols_drop)
+    concatenated_df.drop((cols_drop + list(concatenated_df.filter(regex = 'Home Team')) + list(concatenated_df.filter(regex = 'Away Team'))), axis = 1, inplace = True)
+    concatenated_df['Away Underdog'].replace(0, -1, inplace=True)
+
+    new_column_tuples = []
+    for i in range(int(len(non_relative_columns)/2)):
+        new_column_tuples.append((non_relative_columns[i],non_relative_columns[i+31]))
+
+    for col_pair in new_column_tuples:
+        concatenated_df['underdog_rel_' + col_pair[0][5:]] = \
+            (concatenated_df[col_pair[0]] - concatenated_df[col_pair[1]])*concatenated_df['Away Underdog']
+
+    concatenated_df['Home Relative Age Diff'] = concatenated_df['Home Relative Age Diff']*concatenated_df['Away Underdog']*1 
+    concatenated_df.drop(columns=non_relative_columns, inplace=True)
+
+    return concatenated_df
+
+
+
+
+def portfolio_roi(truths, probs, stake, thresh=0.5, test_years=[2019, 2020]):
+    '''
+    Function that accepts the following arguments: 
+    **truths - actual outcomes of underdog wins/losses, 
+    **probs - model.predict_proba[:, 1] array (model's probability estimate of the underdog winning)
+    **stake - stake to bet on each game
+    **thresh- confidence threshold for filtering bets
+    **test_years - years from which to get test data
+    **main_path - file access URL path
+    returns 
+    **bet_history - list of realized ROI following every bet placed
+    **roi - expected portfolio ROI
+    '''
+    # Get absolute odds from within function instead of passing them in as a parameter
+    odds_df = pd.DataFrame()
+    for year in test_years:
+        df = pd.read_csv(os.getcwd() + '\\' + f'{year}_stats_n5.csv')
+        odds_df = pd.concat([odds_df, df])
+    odds_df.index = range(len(odds_df))
+    odds = odds_df[['Home Odds Close', 'Away Odds Close']].max(axis=1).values    
+    
+    # Initialize all necessary variables & data structures for computations
+    portfolio = pd.DataFrame({'Actuals': truths, 'Preds': probs, 'Odds': odds})
+    sum_bets, sum_winnings = 0, 0
+    bet_history = []
+    
+    win_prob = portfolio['Preds'] >= thresh
+    good_bets = portfolio[win_prob]
+                
+    # Iterate over every row
+    for index, row in good_bets.iterrows():
+        # # Weight each bet based on higher risk games
+        # high_stake = stake * row['Odds']/2.0
+        
+        # # Choose appropriate stake amount based on odds value
+        # select_stake = high_stake if (row['Odds'] >= 3) else stake
+        
+        # Track the total amount of money placed on bets
+        sum_bets += stake
+
+        if row['Actuals'] == 1:
+            # Track the total amount of earnings from winning bets
+            sum_winnings += (stake * row['Odds'])
+        else:
+            # If the underdog loses, the loss is already accounted for by tracking how much money was bet
+            # and the fact that no money was won (comes into play during ROI colculation)
+            pass
+           
+        # Append change to portfolio
+        current_pct = ((sum_winnings - sum_bets) / sum_bets) * 100
+        bet_history.append(current_pct)
+    
+    # ROI calculation
+    if sum_bets == 0:
+        roi = 0
+    else:
+        roi = (sum_winnings - sum_bets) / sum_bets
+
+    return bet_history, roi
+
+
+def plot_vs_random(models, randoms):
+    '''
+    Function that plots a model's game-by-game ROI against that of random guessing
+    Accepts the following arguments:
+    **models - dict of models w/ their betting histories
+    **randoms - betting history of random guessing
+    '''
+    for model in models.keys():
+        print('{} ROI: {:.2f}%'.format(model, models[model][-1]))
+
+    print('Random ROI: {:.2f}%'.format(randoms[-1]))
+
+    for model in models.keys():
+        plt.plot(range(1, len(models[model]) + 1), models[model], label=f'{model}')
+        
+    plt.plot(range(1, len(randoms) + 1), randoms, label='Random Guessing')
+
+    plt.title('Per Game Portfolio ROI')
+    plt.xlabel('Games Bet On')
+    plt.ylabel('ROI (%)')
+    plt.legend()
+
+
+
+def logistic_bakeoff(yearlist, scoremethod):
+    '''
+    Function that will perform gridsearch on logistic regression for specific 
+    year range and output ROIs for all rolling windows over that period based 
+    on 2018-2019/2019-2020 season betting portfolio
+    
+    yearlist: type list of ints from 2009-2019
+    scoremethod: any metric of interest for gridsearch (f1, precision, recall, etc)
+    '''
+    
+    train_dfs, test_dfs = {}, {}
+    for i in range(5,51):
+        train_dfs[f'train_{i}'] = construct_df(yearlist, i, os.getcwd()+'\\')
+        test_dfs[f'test_{i}'] = construct_df(range(2019,2021), i, os.getcwd()+'\\')
+    
+    # Generate training and testing datasets for all rolling windows
+    X_trains, Y_trains, X_tests, Y_tests = {}, {}, {}, {}
+    for i in train_dfs:
+        X_trains[i] = train_dfs[i].drop('Underdog Win', 1)
+        Y_trains[i] = train_dfs[i]['Underdog Win']
+    for i in test_dfs:
+        X_tests[i] = test_dfs[i].drop('Underdog Win', 1)
+        Y_tests[i] = test_dfs[i]['Underdog Win']
+        
+    #Use Kfold to create 5 folds
+    kfolds = KFold(n_splits = 5)
+    
+    #Create a set of steps. All but the last step is a transformer (something that processes data). 
+    #Build a list of steps, where the first is StandardScaler and the last is LogisticRegression
+    #PCA questionable here, but improves runtime significantly
+    steps = [('scaler', StandardScaler()),
+             ('pca', PCA()),
+             ('lr', LogisticRegression(solver = 'liblinear', class_weight = 'balanced'))]
+    
+    #Now set up the pipeline
+    pipeline = Pipeline(steps)
+    
+    #Now set up the parameter grid
+    parameters_scaler = dict(lr__C = [10**i for i in range(-3, 3)],
+                             lr__penalty = ['l1', 'l2'],
+                             lr__max_iter = [100, 1000, 10000])
+    
+    #Now run a grid search
+    lr_grid_search_scaler = GridSearchCV(pipeline, param_grid = parameters_scaler, cv = kfolds, scoring = scoremethod)
+    
+    #Generate various metrics for all rolling windows and store in dictionaries
+    bestmodels, predicts, predict_probas, precisions, recalls, f1s, loglosses, aucs = {}, {}, {}, {}, {}, {}, {}, {}
+    for i, j in list(zip(X_trains, X_tests)):
+        lr_grid_search_scaler.fit(X_trains[i], Y_trains[i])
+        bestmodels[j] = lr_grid_search_scaler.best_estimator_
+        predicts[j] = lr_grid_search_scaler.predict(X_tests[j])
+        predict_probas[j] = lr_grid_search_scaler.predict_proba(X_tests[j])
+        precisions[j] = precision_score(Y_tests[j], predicts[j])
+        recalls[j] = recall_score(Y_tests[j], predicts[j])
+        f1s[j] = f1_score(Y_tests[j], predicts[j])
+        loglosses[j] = log_loss(Y_tests[j], predict_probas[j][:,1])
+        aucs[j] = roc_auc_score(Y_tests[j], predict_probas[j][:,1])
+        
+    return bestmodels, predict_probas, precisions, recalls, f1s, loglosses, aucs
+
+
+years = [range(2010,2018), range(2011,2018), range(2012,2018), range(2013,2018), range(2014,2018), range(2015,2018)]
+scores = ['f1', 'precision', 'neg_log_loss']
+bestmodels, predict_probas, precisions, recalls, f1s, loglosses, aucs = {}, {}, {}, {}, {}, {}, {}
+for y in years:
+    for s in scores:
+        bestmodels[str(y[0]) + f'_{s}'], predict_probas[str(y[0]) + f'_{s}'], precisions[str(y[0]) + f'_{s}'], recalls[str(y[0]) + f'_{s}'], f1s[str(y[0]) + f'_{s}'], loglosses[str(y[0]) + f'_{s}'], aucs[str(y[0]) + f'_{s}'] = logistic_bakeoff(y, s)
+        
+
+#True underdog win values
+Y_true = construct_df(range(2020,2021), 13, os.getcwd()+'\\')['Underdog Win']
+X_test = construct_df(range(2019,2021), 13, os.getcwd()+'\\').drop('Underdog Win',1)
+
+#Generate list of ROIs to determine rolling window to use - can set multiple thresh values
+rois = {}    
+for i in predict_probas.keys():
+    rois[i] = {}
+    for j in predict_probas[i].keys():
+        rois[i][j] = portfolio_roi(Y_true, predict_probas[i][j][:,1], 10, thresh = 0.5)
+
+bestrois = {}
+for i in rois.keys():
+    best =  max(rois[i], key = rois[i].get)
+    bestrois[i] = [best, rois[i][best]]
+    
+    
+# Checking precisions, recalls, etc
+test = deepcopy(predict_probas['2012_precision']['test_13'])
+for i in range(len(test[:,1])):
+    if test[i,1] > 0.5:
+        test[i,1] = 1
+    else:
+        test[i,1] = 0
+
+recall_test = recall_score(Y_true, test[:,1])
+precision_test = precision_score(Y_true, test[:,1])
+loss = log_loss(Y_true, test[:,1])
+
+
+
+
+
+
+
+
+
+
+rfproba = pd.read_csv('rf_proba_vec.csv', header = None).mean(axis = 1)
+gbtproba = pd.read_csv('gbt_proba_vec.csv', header = None).mean(axis = 1)
+
+# # Plotting ROIs
+# # Random guessing; based on 23% win probability of underdog
+hist_df = pd.DataFrame()
+min_hist = 1000
+
+for i in range(5000):
+    rand = np.random.choice([0, 1], size=(len(Y_true),), p=[0.77, 0.23])
+    rand_history, rand_roi = portfolio_roi(Y_true, rand, 10, test_years = [2020])
+    
+    if len(rand_history) < min_hist:
+        min_hist = len(rand_history)
+    
+    hist_df = pd.concat([hist_df, pd.Series(rand_history)], ignore_index=True, axis=1)
+
+# # Average out Monte Carlo simulations
+avg_rand_history = hist_df.iloc[:min_hist].mean(axis=1).values
+
+# # Model predictions
+rf_pred_history, rf_pred_roi = portfolio_roi(Y_true, rfproba, 10, test_years=[2020])
+gbt_pred_history, gbt_pred_roi = portfolio_roi(Y_true, gbtproba, 10, test_years=[2020])
+
+rf_pred_history.insert(0, 0)
+gbt_pred_history.insert(0, 0)
+
+models = {'Random Forest': rf_pred_history, 'Gradient-Boosted Tree': gbt_pred_history}
+
+# # Compare betting strategies
+plot_vs_random(models, avg_rand_history)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Plotting log losses
+losses_0 = [log_loss([0], [x], labels=[0,1]) for x in test[:,1]]
+new_x0, new_y0 = zip(*sorted(zip(test, losses_0)))
+plt.plot(new_x0,new_y0, label='test')
+
+
+
+# Plotting log loss for RF
+losses_0 = [log_loss([0], [x], labels=[0,1]) for x in rfproba]
+new_x0, new_y0 = zip(*sorted(zip(rfproba, losses_0)))
+plt.plot(new_x0,new_y0, label='test')
+plt.xticks(np.arange(0, 1, step=0.1))
+plt.show()
+
+# Plotting log loss for GBT
+losses_0g = [log_loss([0], [x], labels=[0,1]) for x in gbtproba]
+new_x0g, new_y0g = zip(*sorted(zip(gbtproba, losses_0g)))
+plt.plot(new_x0,new_y0, label='Random Forest')
+plt.plot(new_x0g,new_y0g, label='Gradient-Boosted Tree')
+plt.legend()
+plt.xticks(np.arange(0, 1, step=0.1))
+plt.show()
+
+
+
+
+
+def calculate_log_loss(class_ratio,multi=10000):
+    
+    if sum(class_ratio)!=1.0:
+        print("warning: Sum of ratios should be 1 for best results")
+        class_ratio[-1]+=1-sum(class_ratio)  # add the residual to last class's ratio
+    
+    actuals=[]
+    for i,val in enumerate(class_ratio):
+        actuals=actuals+[i for x in range(int(val*multi))]
+        
+
+    preds=[]
+    for i in range(multi):
+        preds+=[class_ratio]
+
+    return (log_loss(actuals, preds))
+
+loss = calculate_log_loss([0.23, 0.77], 100)
+
